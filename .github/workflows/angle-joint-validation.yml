@@ -37,14 +37,16 @@ jobs:
           from pathlib import Path
           p = Path("crates/doc/src/joints_relations.rs")
           text = p.read_text()
-          fixed = "c < *b - 1e-12 * c.max(1.0)"
+          fixed = "c < *b - 1e-12 * tie_scale"
+          scoped = "        let tie_scale = if j.kind == super::JointKind::Angle { c.max(1.0) } else { 1.0 };\n"
           original = "c < *b - 1e-12"
           assert text.count(fixed) == 1, "Expected exactly one production comparison"
-          p.write_text(text.replace(fixed, original))
+          assert text.count(scoped) == 1
+          p.write_text(text.replace(scoped, "").replace(fixed, original))
           PY
           git diff -- "$source"
           set +e
-          cargo test --locked --profile ci -p solidcraft-engine --lib \
+          cargo test --locked --profile ci -p solidcraft-doc -p solidcraft-engine --lib \
             cmd::joints::relations_tests::angle_relation_previews_keep_the_same_hinge_branch \
             -- --exact --nocapture > "$RUNNER_TEMP/angle-red.log" 2>&1
           status=$?
@@ -67,7 +69,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in 1 2; do
-            cargo test --locked --profile ci -p solidcraft-engine --lib \
+            cargo test --locked --profile ci -p solidcraft-doc -p solidcraft-engine --lib \
               cmd::joints::relations_tests::angle_relation_ \
               -- --nocapture
             echo "Fixed regression attempt $attempt exit: 0"
@@ -77,7 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in 1 2; do
-            cargo test --locked --profile ci -p solidcraft-doc --lib angle_fit_ -- --nocapture
+            cargo test --locked --profile ci -p solidcraft-doc -p solidcraft-engine --lib angle_fit_ -- --nocapture
             echo "Angle-fit oracle attempt $attempt exit: 0"
           done
       - name: Run the related engine joint tests
@@ -85,7 +87,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked --profile ci -p solidcraft-engine --lib cmd::joints:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/related-fixed.log"
+          cargo test --locked --profile ci -p solidcraft-doc -p solidcraft-engine --lib cmd::joints:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/related-fixed.log"
           echo "Related engine joint tests exit: 0"
       - name: Attribute related-test failures against the original comparison
         if: failure() && steps.related.outcome == 'failure'
@@ -99,12 +101,14 @@ jobs:
           from pathlib import Path
           p = Path("crates/doc/src/joints_relations.rs")
           text = p.read_text()
-          fixed = "c < *b - 1e-12 * c.max(1.0)"
+          fixed = "c < *b - 1e-12 * tie_scale"
+          scoped = "        let tie_scale = if j.kind == super::JointKind::Angle { c.max(1.0) } else { 1.0 };\n"
           assert text.count(fixed) == 1
-          p.write_text(text.replace(fixed, "c < *b - 1e-12"))
+          assert text.count(scoped) == 1
+          p.write_text(text.replace(scoped, "").replace(fixed, "c < *b - 1e-12"))
           PY
           set +e
-          cargo test --locked --profile ci -p solidcraft-engine --lib cmd::joints:: -- --nocapture > "$RUNNER_TEMP/related-original.log" 2>&1
+          cargo test --locked --profile ci -p solidcraft-doc -p solidcraft-engine --lib cmd::joints:: -- --nocapture > "$RUNNER_TEMP/related-original.log" 2>&1
           status=$?
           set -e
           echo "Original comparison related-test exit: $status"

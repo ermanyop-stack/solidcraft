@@ -56,9 +56,10 @@ pub fn relation_values(doc: &Document, st: &ModelState, j: &Joint) -> Option<Vec
         // Tolerance 0: as near as it gets; `q` keeps the best values reached.
         least_squares(&mut gaps, &mut q, &bounds, 0.0);
         let Some(c) = gaps(&q).map(|r| cost(&r)) else { continue };
-        // Rotation costs grow with the square of the part's size. Keep the first of
-        // numerically equal minima instead of switching symmetric poses on roundoff.
-        if best.as_ref().is_none_or(|(b, _)| c < *b - 1e-12 * c.max(1.0)) {
+        // Angle's equally near azimuths have rotation costs proportional to the part's size
+        // squared. Keep the first when only roundoff differs; other types keep their comparison.
+        let tie_scale = if j.kind == super::JointKind::Angle { c.max(1.0) } else { 1.0 };
+        if best.as_ref().is_none_or(|(b, _)| c < *b - 1e-12 * tie_scale) {
             best = Some((c, q));
         }
     }
