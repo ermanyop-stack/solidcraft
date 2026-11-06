@@ -56,7 +56,9 @@ pub fn relation_values(doc: &Document, st: &ModelState, j: &Joint) -> Option<Vec
         // Tolerance 0: as near as it gets; `q` keeps the best values reached.
         least_squares(&mut gaps, &mut q, &bounds, 0.0);
         let Some(c) = gaps(&q).map(|r| cost(&r)) else { continue };
-        if best.as_ref().is_none_or(|(b, _)| c < *b - 1e-12) {
+        // Rotation costs grow with the square of the part's size. Keep the first of
+        // numerically equal minima instead of switching symmetric poses on roundoff.
+        if best.as_ref().is_none_or(|(b, _)| c < *b - 1e-12 * c.max(1.0)) {
             best = Some((c, q));
         }
     }
@@ -98,6 +100,91 @@ mod tests {
 
     fn z_of(m: &Mat) -> Vec3 {
         Vec3::new(m[2][0], m[2][1], m[2][2])
+    }
+
+    fn fitted_angle(size: f64, now: Mat, theta: f64) -> (Mat, f64) {
+        let body = solidcraft_kernel::box_solid(Vec3::ZERO, Vec3::new(size, size, size)).unwrap();
+        let scale = body.size().clamp(1.0, 1e5);
+        let mut st = ModelState::default();
+        st.bodies.push(crate::ModelBody::new("Base".into(), body, 0));
+        let mut doc = Document::default();
+        doc.components.push(crate::Component { id: 1, name: "Frame".into(), ..Default::default() });
+        doc.occurrences.push(crate::Occurrence {
+            id: 2,
+            component: 1,
+            parent: 0,
+            name: "Frame:1".into(),
+            transform: mat_inverse(&now).unwrap(),
+            grounded: false,
+        });
+        let at = |occurrence| JointOrigin { occurrence, snap: Snap::Frame { origin: Vec3::ZERO, z: Vec3::Z, x: Some(Vec3::X) } };
+        let mut j = joint(JointKind::Angle);
+        j.a = at(2);
+        j.b = at(0);
+        j.flip = true;
+        j.angle = theta;
+        let q = relation_values(&doc, &st, &j).unwrap();
+        (link_of(&j, &q), scale)
+    }
+
+    fn frame_cost(got: &Mat, now: &Mat, scale: f64) -> f64 {
+        got.iter()
+            .zip(now)
+            .enumerate()
+            .map(|(column, (a, b))| {
+                let weight = if column == 3 { 1.0 } else { scale };
+                a.iter().zip(b).take(3).map(|(a, b)| ((a - b) * weight).powi(2)).sum::<f64>()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn angle_fit_matches_the_analytic_nearest_pose_at_different_scales() {
+        use super::super::{rot_y, rot_z, shift};
+        let beta = 35.0_f64.to_radians();
+        let translation = shift(3.0, -7.0, 11.0);
+        let twist = rot_z(0.37);
+        for size in [1.0, 30.0, 1000.0] {
+            for sign in [-1.0, 1.0] {
+                let now = mat_mul(&translation, &mat_mul(&rot_y(sign * beta), &twist));
+                for degrees in [20.0_f64, 35.0, 35.0 + 1e-7, 35.0 + 1e-4, 60.0] {
+                    let theta = degrees.to_radians();
+                    let want = mat_mul(&translation, &mat_mul(&rot_y(sign * theta), &twist));
+                    let (got, scale) = fitted_angle(size, now, theta);
+                    // The shortest rotation changes the normal's polar angle by |theta-beta|.
+                    let minimum = 8.0 * scale.powi(2) * ((theta - beta) * 0.5).sin().powi(2);
+                    let cost = frame_cost(&got, &now, scale);
+                    let excess = (cost - minimum).max(0.0);
+                    assert!(
+                        excess <= 1e-12 * minimum.max(1.0),
+                        "size={size}, sign={sign}, theta={degrees}: cost={cost:.17e}, minimum={minimum:.17e}"
+                    );
+                    for (a, b) in got.iter().zip(&want) {
+                        for (a, b) in a.iter().zip(b) {
+                            assert!((a - b).abs() < 1e-7, "size={size}, sign={sign}, theta={degrees}: {got:?}, want {want:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn angle_fit_keeps_a_consistent_axis_when_the_start_is_symmetric() {
+        for size in [1.0, 30.0, 1000.0] {
+            let mut previous: Option<Mat> = None;
+            for degrees in [140.0_f64, 150.0, 160.0, 170.0, 160.0, 150.0, 140.0] {
+                let theta = degrees.to_radians();
+                let (got, scale) = fitted_angle(size, IDENTITY, theta);
+                let minimum = 8.0 * scale.powi(2) * (theta * 0.5).sin().powi(2);
+                assert!((frame_cost(&got, &IDENTITY, scale) - minimum).abs() <= 1e-12 * minimum.max(1.0));
+                if let Some(before) = previous {
+                    let step = 8.0 * 5.0_f64.to_radians().sin().powi(2);
+                    assert!((frame_cost(&got, &before, 1.0) - step).abs() < 1e-7, "size={size}, theta={degrees}: {before:?} -> {got:?}");
+                }
+                previous = Some(got);
+            }
+        }
     }
 
     /// Whatever its values, each relation keeps what it ties.

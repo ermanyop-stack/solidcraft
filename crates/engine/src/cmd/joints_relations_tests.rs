@@ -166,6 +166,91 @@ fn an_angle_relation_holds_its_tilt_and_follows_an_edit() {
     assert!((place(&s, "Bracket", Vec3::new(20.0, 500.0, 0.0)).z - 2.0).abs() < 1e-6);
 }
 
+fn angle_hinge(scale: f64) -> Session {
+    let mut s = Session::default();
+    run(
+        &mut s,
+        "solid.box",
+        json!({"length": 30.0 * scale, "width": 10.0 * scale, "height": 4.0 * scale,
+        "corner": [-15.0 * scale, -10.0 * scale, -4.0 * scale]}),
+    );
+    run(&mut s, "component.create", json!({"name": "Part"}));
+    run(&mut s, "solid.box", json!({"length": 10.0 * scale, "width": 2.0 * scale, "height": 30.0 * scale}));
+    run(&mut s, "component.activate", json!({"component": "root"}));
+    run(&mut s, "occurrence.ground", json!({"occurrence": "Part:1", "grounded": false}));
+    for (kind, name) in [("cylindrical", "Cylinder"), ("planar", "Plane")] {
+        let r = run(
+            &mut s,
+            "joint.create",
+            json!({"type": kind, "name": name, "flip": false, "angle": 0,
+            "a": {"occurrence": 0, "point": [0, 0, 0], "z": [1, 0, 0], "x": [0, 0, 1]},
+            "b": {"occurrence": "Part", "point": [0, 0, 0], "z": [-1, 0, 0], "x": [0, 0, 1]}}),
+        );
+        assert!(clean(&r), "{r}");
+    }
+    let r = run(
+        &mut s,
+        "joint.create",
+        json!({"type": "angle", "name": "Tilt", "angle": 0,
+        "a": {"occurrence": "Part", "point": [0, 0, 0], "z": [0, 1, 0], "x": [0, 0, 1]},
+        "b": {"occurrence": 0, "point": [0, 0, 0], "z": [0, -1, 0], "x": [0, 0, 1]}}),
+    );
+    assert!(clean(&r), "{r}");
+    s
+}
+
+#[test]
+fn angle_relation_previews_keep_the_same_hinge_branch() {
+    for scale in [1.0 / 30.0, 1.0, 1000.0 / 30.0] {
+        let s = angle_hinge(scale);
+        let mut previous: Option<Vec3> = None;
+        for degrees in [140.0_f64, 150.0, 160.0, 170.0, 160.0, 150.0, 140.0] {
+            // Each dialog preview starts from the unchanged session, not the preceding preview.
+            let mut preview = s.scratch();
+            let r = run(&mut preview, "joint.edit", json!({"joint": "Tilt", "angle": degrees}));
+            assert!(clean(&r), "{degrees}: {r}");
+            let at = place(&preview, "Part", Vec3::ZERO);
+            let direction = place(&preview, "Part", Vec3::Y) - at;
+            assert!(near(at, Vec3::ZERO, 1e-6), "{degrees}: {at:?}");
+            assert!(near(place(&preview, "Part", Vec3::X) - at, Vec3::X, 1e-6), "{degrees}: hinge axis moved");
+            assert!(direction.x.abs() < 1e-6, "{degrees}: {direction:?}");
+            assert!((direction.y - degrees.to_radians().cos()).abs() < 1e-6, "{degrees}: {direction:?}");
+            if let Some(before) = previous {
+                let expected = 2.0 * 5.0_f64.to_radians().sin();
+                assert!((direction.dist(before) - expected).abs() < 1e-6, "{degrees}: {before:?} -> {direction:?}");
+            }
+            previous = Some(direction);
+            assert!(near(place(&s, "Part", Vec3::Y), Vec3::Y, 1e-6), "preview changed the source pose");
+        }
+    }
+}
+
+#[test]
+fn angle_relation_edits_keep_either_existing_hinge_branch() {
+    let original = angle_hinge(1.0);
+    for sign in [-1.0_f64, 1.0] {
+        let mut s = original.scratch();
+        run(&mut s, "joint.edit", json!({"joint": "Tilt", "suppressed": true}));
+        run(&mut s, "joint.drive", json!({"joint": "Cylinder", "value": sign * 5.0}));
+        let r = run(&mut s, "joint.edit", json!({"joint": "Tilt", "angle": 5, "suppressed": false}));
+        assert!(clean(&r), "{r}");
+        for degrees in [140.0_f64, 150.0, 160.0, 170.0, 160.0, 150.0, 140.0] {
+            let mut preview = s.scratch();
+            let r = run(&mut preview, "joint.edit", json!({"joint": "Tilt", "angle": degrees}));
+            assert!(clean(&r), "{sign}, {degrees}: {r}");
+            let want = Vec3::new(0.0, degrees.to_radians().cos(), sign * degrees.to_radians().sin());
+            assert!(near(place(&preview, "Part", Vec3::Y), want, 1e-6), "{sign}, {degrees}");
+        }
+        // Committed edits follow the same branch in both directions too.
+        for degrees in [140.0_f64, 150.0, 160.0, 170.0, 160.0, 150.0, 140.0] {
+            let r = run(&mut s, "joint.edit", json!({"joint": "Tilt", "angle": degrees}));
+            assert!(clean(&r), "{sign}, {degrees}: {r}");
+            let want = Vec3::new(0.0, degrees.to_radians().cos(), sign * degrees.to_radians().sin());
+            assert!(near(place(&s, "Part", Vec3::Y), want, 1e-6), "{sign}, {degrees}");
+        }
+    }
+}
+
 #[test]
 fn a_rod_lies_tangent_on_the_panel_and_rolls_along_it() {
     let mut s = panel();

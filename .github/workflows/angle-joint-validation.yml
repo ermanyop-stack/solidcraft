@@ -1,0 +1,112 @@
+name: Angle joint continuity validation
+
+on:
+  push:
+    branches: [validation-12426-angle-joint-continuity]
+
+permissions:
+  contents: read
+
+jobs:
+  angle-joint:
+    if: github.repository == 'ermanyop-stack/solidcraft'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_BUILD_JOBS: "2"
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Record the tested source and toolchain
+        run: |
+          git rev-parse HEAD
+          rustc --version --verbose
+          cargo --version
+          df -h .
+          free -h
+      - name: Prove the regression fails with the original comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=crates/doc/src/joints_relations.rs
+          cp "$source" "$RUNNER_TEMP/joints_relations.fixed.rs"
+          trap 'cp "$RUNNER_TEMP/joints_relations.fixed.rs" "$source"' EXIT
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("crates/doc/src/joints_relations.rs")
+          text = p.read_text()
+          fixed = "c < *b - 1e-12 * c.max(1.0)"
+          original = "c < *b - 1e-12"
+          assert text.count(fixed) == 1, "Expected exactly one production comparison"
+          p.write_text(text.replace(fixed, original))
+          PY
+          git diff -- "$source"
+          set +e
+          cargo test --locked --profile ci -p solidcraft-engine --lib \
+            cmd::joints::relations_tests::angle_relation_previews_keep_the_same_hinge_branch \
+            -- --exact --nocapture > "$RUNNER_TEMP/angle-red.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/angle-red.log"
+          echo "Original comparison cargo exit: $status"
+          test "$status" -eq 101
+          grep -F "test result: FAILED. 0 passed; 1 failed;" "$RUNNER_TEMP/angle-red.log"
+          grep -E "thread 'cmd::joints::relations_tests::angle_relation_previews_keep_the_same_hinge_branch'( \([0-9]+\))? panicked at" "$RUNNER_TEMP/angle-red.log"
+          grep -F 'crates/engine/src/cmd/joints_relations_tests.rs:' "$RUNNER_TEMP/angle-red.log"
+          grep -F ' -> ' "$RUNNER_TEMP/angle-red.log"
+          if grep -Ei 'SIGSEGV|SIGABRT|segmentation fault|access violation|signal: [0-9]+' "$RUNNER_TEMP/angle-red.log"; then
+            echo "A crash is not an assertion-based regression proof."
+            exit 1
+          fi
+      - name: Check the fixed source is restored
+        run: git diff --exit-code -- crates/doc/src/joints_relations.rs
+      - name: Run the fixed regression twice
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            cargo test --locked --profile ci -p solidcraft-engine --lib \
+              cmd::joints::relations_tests::angle_relation_ \
+              -- --nocapture
+            echo "Fixed regression attempt $attempt exit: 0"
+          done
+      - name: Run the analytic nearest-pose and symmetric-axis tests twice
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            cargo test --locked --profile ci -p solidcraft-doc --lib angle_fit_ -- --nocapture
+            echo "Angle-fit oracle attempt $attempt exit: 0"
+          done
+      - name: Run the related engine joint tests
+        id: related
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --profile ci -p solidcraft-engine --lib cmd::joints:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/related-fixed.log"
+          echo "Related engine joint tests exit: 0"
+      - name: Attribute related-test failures against the original comparison
+        if: failure() && steps.related.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=crates/doc/src/joints_relations.rs
+          cp "$source" "$RUNNER_TEMP/joints_relations.fixed.rs"
+          trap 'cp "$RUNNER_TEMP/joints_relations.fixed.rs" "$source"' EXIT
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("crates/doc/src/joints_relations.rs")
+          text = p.read_text()
+          fixed = "c < *b - 1e-12 * c.max(1.0)"
+          assert text.count(fixed) == 1
+          p.write_text(text.replace(fixed, "c < *b - 1e-12"))
+          PY
+          set +e
+          cargo test --locked --profile ci -p solidcraft-engine --lib cmd::joints:: -- --nocapture > "$RUNNER_TEMP/related-original.log" 2>&1
+          status=$?
+          set -e
+          echo "Original comparison related-test exit: $status"
+          cat "$RUNNER_TEMP/related-original.log"
+          echo "The new continuity regression is expected to fail on the original comparison."
